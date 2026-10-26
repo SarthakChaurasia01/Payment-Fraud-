@@ -1,237 +1,616 @@
+
 from pathlib import Path
+
 import joblib
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="PaymentShield AI", page_icon="🛡️", layout="wide")
+# -------------------- PAGE CONFIG --------------------
 
-ROOT = Path(__file__).resolve().parent
-MODEL_PATH = ROOT / "models" / "fraud_detection_model.pkl"
+st.set_page_config(
+    page_title="PaymentShield AI",
+    page_icon="🛡️",
+    layout="wide",
+)
+
+MODEL_PATH = (
+    Path(__file__).resolve().parent
+    / "models"
+    / "fraud_detection_model.pkl"
+)
+
+RAW_COLUMNS = [
+    "type",
+    "amount",
+    "oldbalanceOrg",
+    "newbalanceOrig",
+    "oldbalanceDest",
+    "newbalanceDest",
+]
+
 FEATURES = [
-    "amount", "oldbalanceOrg", "newbalanceOrig",
-    "oldbalanceDest", "newbalanceDest",
-    "type_CASH_OUT", "type_TRANSFER",
-]
-RAW_REQUIRED = [
-    "amount", "oldbalanceOrg", "newbalanceOrig",
-    "oldbalanceDest", "newbalanceDest", "type",
+    "amount",
+    "oldbalanceOrg",
+    "newbalanceOrig",
+    "oldbalanceDest",
+    "newbalanceDest",
+    "type_CASH_OUT",
+    "type_TRANSFER",
 ]
 
-st.markdown("""
-<style>
-.block-container {padding-top: 1.4rem; padding-bottom: 2rem; max-width: 1400px;}
-.hero {padding: 1.25rem 1.4rem; border-radius: 16px; background: linear-gradient(115deg, #101b31, #172a42); border: 1px solid #2b4058; margin-bottom: 1rem;}
-.hero h1 {margin: 0; font-size: 2.1rem;}
-.hero p {margin: .45rem 0 0 0; color: #c5d4e5;}
-.small-note {font-size: .86rem; color: #9aa9bb;}
-</style>
-""", unsafe_allow_html=True)
+# -------------------- STYLING --------------------
+
+st.markdown(
+    """
+    <style>
+    .block-container {
+        max-width: 1250px;
+        padding-top: 1.5rem;
+        padding-bottom: 2rem;
+    }
+    .hero {
+        padding: 1.4rem;
+        border-radius: 14px;
+        background: linear-gradient(120deg, #102039, #1b3655);
+        border: 1px solid #294565;
+        margin-bottom: 1rem;
+    }
+    .hero h1 {
+        margin: 0;
+        font-size: 2rem;
+        color: white;
+    }
+    .hero p {
+        margin: .45rem 0 0;
+        color: #c4d5e8;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# -------------------- MODEL LOADING --------------------
 
 @st.cache_resource
 def load_model():
+    """Load the saved model once per app session."""
     return joblib.load(MODEL_PATH)
 
-def make_features(df):
-    data = df.copy()
-    data["type"] = data["type"].astype(str).str.upper().str.strip()
-    invalid = sorted(set(data["type"].dropna()) - {"CASH_OUT", "TRANSFER"})
-    if invalid:
-        raise ValueError("Unsupported transaction type(s): " + ", ".join(invalid))
-    for c in ["amount", "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest"]:
-        data[c] = pd.to_numeric(data[c], errors="coerce")
-    if data[RAW_REQUIRED].isna().any().any():
-        raise ValueError("CSV contains missing or non-numeric required values.")
-    if (data[["amount", "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest"]] < 0).any().any():
-        raise ValueError("Amounts and balances must not be negative.")
-    X = pd.DataFrame(index=data.index)
-    for c in ["amount", "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest"]:
-        X[c] = data[c]
-    X["type_CASH_OUT"] = (data["type"] == "CASH_OUT").astype(int)
-    X["type_TRANSFER"] = (data["type"] == "TRANSFER").astype(int)
-    return X[FEATURES]
 
 try:
     model = load_model()
-except Exception as e:
-    st.error(f"Unable to load model: {e}")
+except Exception as exc:
+    st.error(f"Could not load the model: {exc}")
+    st.info(
+        "Check that models/fraud_detection_model.pkl exists "
+        "and that your installed ML package versions are compatible."
+    )
+    st.stop()
+
+
+if not hasattr(model, "predict_proba"):
+    st.error("The saved model does not support predict_proba().")
     st.stop()
 
 if getattr(model, "n_features_in_", None) != len(FEATURES):
     st.error(
-        f"The loaded model expects {getattr(model, 'n_features_in_', 'an unknown number of')} "
-        f"features, but this app supplies {len(FEATURES)}. Check training preprocessing."
+        f"The model expects "
+        f"{getattr(model, 'n_features_in_', 'an unknown number of')} "
+        f"features, but this app supplies {len(FEATURES)}. "
+        "Check the training feature order."
     )
     st.stop()
 
-st.markdown("""
-<div class="hero">
-  <h1>🛡️ PaymentShield AI</h1>
-  <p>Payment fraud screening · Model-assisted triage · Batch review workspace</p>
-</div>
-""", unsafe_allow_html=True)
 
-with st.sidebar:
-    st.header("Screening settings")
-    threshold = st.slider(
-        "Flag for review at probability",
-        min_value=0.01, max_value=0.99, value=0.35, step=0.01,
-        help="A demo decision threshold only. Calibrate on representative validation data before real use."
+# -------------------- PREPROCESSING --------------------
+
+def prepare_features(raw: pd.DataFrame) -> pd.DataFrame:
+    """Convert raw transactions into the model's expected features."""
+
+    missing = [column for column in RAW_COLUMNS if column not in raw.columns]
+
+    if missing:
+        raise ValueError(
+            "Missing required CSV columns: " + ", ".join(missing)
+        )
+
+    df = raw.copy()
+
+    df["type"] = (
+        df["type"]
+        .astype(str)
+        .str.upper()
+        .str.strip()
     )
-    st.caption("Lower thresholds flag more cases and may increase false alarms.")
-    st.divider()
-    st.caption("Model: XGBoost classifier")
-    st.caption("Training data: simulated PaySim transactions")
 
-single_tab, batch_tab, guide_tab = st.tabs(
-    ["🔎 Single transaction", "📂 Batch screening", "ℹ️ How to use"]
+    allowed_types = {"TRANSFER", "CASH_OUT"}
+    invalid_types = sorted(set(df["type"]) - allowed_types)
+
+    if invalid_types:
+        raise ValueError(
+            "This model supports TRANSFER and CASH_OUT only. "
+            "Unsupported types: " + ", ".join(invalid_types)
+        )
+
+    numeric_columns = [
+        "amount",
+        "oldbalanceOrg",
+        "newbalanceOrig",
+        "oldbalanceDest",
+        "newbalanceDest",
+    ]
+
+    for column in numeric_columns:
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce",
+        )
+
+    if df[RAW_COLUMNS].isna().any().any():
+        raise ValueError(
+            "Some required values are missing or non-numeric. "
+            "Please correct the CSV and upload it again."
+        )
+
+    if (df[numeric_columns] < 0).any().any():
+        raise ValueError("Amounts and balances cannot be negative.")
+
+    X = df[numeric_columns].copy()
+
+    X["type_CASH_OUT"] = (
+        df["type"] == "CASH_OUT"
+    ).astype(int)
+
+    X["type_TRANSFER"] = (
+        df["type"] == "TRANSFER"
+    ).astype(int)
+
+    # Keep the exact feature order expected by the saved model.
+    return X[FEATURES]
+
+
+# -------------------- PREDICTION --------------------
+
+def score_transactions(
+    raw: pd.DataFrame,
+    threshold: float,
+) -> pd.DataFrame:
+    """Return transaction data, scores, and review decisions."""
+
+    X = prepare_features(raw)
+
+    probabilities = model.predict_proba(X)[:, 1]
+
+    results = raw.copy().reset_index(drop=True)
+
+    results["fraud_probability"] = probabilities
+
+    results["decision"] = np.where(
+        probabilities >= threshold,
+        "Flag for review",
+        "Not flagged",
+    )
+
+    results["risk_band"] = pd.cut(
+        probabilities,
+        bins=[-np.inf, 0.05, 0.20, np.inf],
+        labels=[
+            "Lower score",
+            "Elevated score",
+            "Higher score",
+        ],
+    ).astype(str)
+
+    return results
+
+
+# -------------------- HEADER --------------------
+
+st.markdown(
+    """
+    <div class="hero">
+        <h1>🛡️ PaymentShield AI</h1>
+        <p>
+            Machine-learning-assisted transaction fraud screening
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
-def score_df(raw):
-    X = make_features(raw)
-    probs = model.predict_proba(X)[:, 1]
-    out = raw.copy().reset_index(drop=True)
-    out["estimated_fraud_probability"] = probs
-    out["risk_band"] = pd.cut(
-        probs, bins=[-np.inf, 0.05, threshold, np.inf],
-        labels=["Lower score", "Monitor", "Flag for review"], include_lowest=True
-    ).astype(str)
-    # Keep the flag decision explicitly tied to the user-selected threshold.
-    out["decision"] = np.where(probs >= threshold, "Flag for review", "Not flagged")
-    return out
+st.caption(
+    "An educational portfolio application using a saved XGBoost model "
+    trained on simulated PaySim transactions."
+)
+
+# -------------------- SIDEBAR --------------------
+
+with st.sidebar:
+    st.header("Decision settings")
+
+    threshold = st.slider(
+        "Flag for review threshold",
+        min_value=0.01,
+        max_value=0.99,
+        value=0.35,
+        step=0.01,
+        help=(
+            "Transactions with scores at or above this value "
+            "will be flagged for review."
+        ),
+    )
+
+    st.caption(
+        "Changing this threshold changes the review decision, "
+        "not the model's predicted probability."
+    )
+
+    st.divider()
+
+    st.write("**Model:** XGBoost classifier")
+    st.write("**Input features:** 7")
+
+
+# -------------------- TABS --------------------
+
+batch_tab, single_tab, about_tab = st.tabs(
+    [
+        "Batch screening",
+        "Single transaction",
+        "About the model",
+    ]
+)
+
+
+# ==================================================
+# BATCH SCREENING
+# ==================================================
+
+with batch_tab:
+    st.subheader("Transaction screening")
+    st.write(
+        "Upload a CSV file to score multiple transactions "
+        "and identify cases for further review."
+    )
+
+    st.markdown("**Required CSV columns**")
+
+    st.code(
+        "type,amount,oldbalanceOrg,newbalanceOrig,"
+        "oldbalanceDest,newbalanceDest",
+        language="text",
+    )
+
+    # Example file users can download.
+    sample_data = pd.DataFrame(
+        [
+            {
+                "type": "TRANSFER",
+                "amount": 5000,
+                "oldbalanceOrg": 10000,
+                "newbalanceOrig": 5000,
+                "oldbalanceDest": 2000,
+                "newbalanceDest": 7000,
+            },
+            {
+                "type": "CASH_OUT",
+                "amount": 12000,
+                "oldbalanceOrg": 15000,
+                "newbalanceOrig": 3000,
+                "oldbalanceDest": 500,
+                "newbalanceDest": 12500,
+            },
+        ]
+    )
+
+    st.download_button(
+        "Download sample CSV",
+        data=sample_data.to_csv(index=False).encode("utf-8"),
+        file_name="paymentshield_sample.csv",
+        mime="text/csv",
+    )
+
+    uploaded_file = st.file_uploader(
+        "Upload transaction CSV",
+        type=["csv"],
+    )
+
+    if uploaded_file is not None:
+        try:
+            raw_data = pd.read_csv(uploaded_file)
+
+            if raw_data.empty:
+                st.warning("The uploaded CSV contains no transactions.")
+            else:
+                st.write(
+                    f"Transactions loaded: **{len(raw_data):,}**"
+                )
+
+                with st.expander("Preview uploaded transactions"):
+                    st.dataframe(
+                        raw_data.head(10),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                if st.button(
+                    "Score transactions",
+                    type="primary",
+                    key="score_batch",
+                ):
+                    try:
+                        results = score_transactions(
+                            raw_data,
+                            threshold,
+                        )
+
+                        total = len(results)
+
+                        flagged = int(
+                            (
+                                results["fraud_probability"]
+                                >= threshold
+                            ).sum()
+                        )
+
+                        mean_score = float(
+                            results["fraud_probability"].mean()
+                        )
+
+                        st.divider()
+                        st.subheader("Screening summary")
+
+                        col1, col2, col3 = st.columns(3)
+
+                        col1.metric(
+                            "Transactions scored",
+                            f"{total:,}",
+                        )
+
+                        col2.metric(
+                            "Flagged for review",
+                            f"{flagged:,}",
+                        )
+
+                        col3.metric(
+                            "Mean estimated score",
+                            f"{mean_score:.2%}",
+                        )
+
+                        st.subheader("Score distribution")
+
+                        score_ranges = pd.cut(
+                            results["fraud_probability"],
+                            bins=[
+                                -0.001,
+                                0.05,
+                                0.20,
+                                0.50,
+                                1.0,
+                            ],
+                            labels=[
+                                "0–5%",
+                                "5–20%",
+                                "20–50%",
+                                "50–100%",
+                            ],
+                        )
+
+                        distribution = (
+                            score_ranges
+                            .value_counts(sort=False)
+                            .rename_axis("Score range")
+                            .to_frame("Transactions")
+                        )
+
+                        st.bar_chart(distribution)
+
+                        st.subheader("Review queue")
+
+                        review_queue = (
+                            results[
+                                results["fraud_probability"]
+                                >= threshold
+                            ]
+                            .sort_values(
+                                "fraud_probability",
+                                ascending=False,
+                            )
+                        )
+
+                        if review_queue.empty:
+                            st.info(
+                                "No transactions met the selected "
+                                "review threshold in this batch."
+                            )
+                        else:
+                            st.dataframe(
+                                review_queue,
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+
+                        st.subheader("All scored transactions")
+
+                        st.dataframe(
+                            results.sort_values(
+                                "fraud_probability",
+                                ascending=False,
+                            ),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        st.download_button(
+                            "Download scored results",
+                            data=results.to_csv(
+                                index=False
+                            ).encode("utf-8"),
+                            file_name=(
+                                "paymentshield_scored_results.csv"
+                            ),
+                            mime="text/csv",
+                        )
+
+                    except Exception as exc:
+                        st.error(
+                            f"Could not score the transactions: {exc}"
+                        )
+
+        except Exception as exc:
+            st.error(f"Could not read the CSV: {exc}")
+
+
+# ==================================================
+# SINGLE TRANSACTION
+# ==================================================
 
 with single_tab:
     st.subheader("Assess one transaction")
-    st.write("Enter transaction details to estimate the model's fraud score.")
-    with st.form("single_transaction"):
-        transaction_type = st.selectbox("Transaction type", ["TRANSFER", "CASH_OUT"])
+
+    with st.form("single_transaction_form"):
+        transaction_type = st.selectbox(
+            "Transaction type",
+            ["TRANSFER", "CASH_OUT"],
+        )
+
         left, right = st.columns(2)
+
         with left:
-            amount = st.number_input("Transaction amount", min_value=0.0, value=5000.0, step=100.0)
-            old_org = st.number_input("Sender balance before", min_value=0.0, value=10000.0, step=100.0)
-            new_org = st.number_input("Sender balance after", min_value=0.0, value=5000.0, step=100.0)
+            amount = st.number_input(
+                "Transaction amount",
+                min_value=0.0,
+                value=5000.0,
+                step=100.0,
+            )
+
+            sender_before = st.number_input(
+                "Sender balance before",
+                min_value=0.0,
+                value=10000.0,
+                step=100.0,
+            )
+
+            sender_after = st.number_input(
+                "Sender balance after",
+                min_value=0.0,
+                value=5000.0,
+                step=100.0,
+            )
+
         with right:
-            old_dest = st.number_input("Recipient balance before", min_value=0.0, value=2000.0, step=100.0)
-            new_dest = st.number_input("Recipient balance after", min_value=0.0, value=7000.0, step=100.0)
-        submitted = st.form_submit_button("Calculate risk score", type="primary", use_container_width=True)
+            recipient_before = st.number_input(
+                "Recipient balance before",
+                min_value=0.0,
+                value=2000.0,
+                step=100.0,
+            )
+
+            recipient_after = st.number_input(
+                "Recipient balance after",
+                min_value=0.0,
+                value=7000.0,
+                step=100.0,
+            )
+
+        submitted = st.form_submit_button(
+            "Calculate risk score",
+            type="primary",
+        )
 
     if submitted:
-        raw = pd.DataFrame([{
-            "type": transaction_type, "amount": amount,
-            "oldbalanceOrg": old_org, "newbalanceOrig": new_org,
-            "oldbalanceDest": old_dest, "newbalanceDest": new_dest,
-        }])
+        transaction = pd.DataFrame(
+            [
+                {
+                    "type": transaction_type,
+                    "amount": amount,
+                    "oldbalanceOrg": sender_before,
+                    "newbalanceOrig": sender_after,
+                    "oldbalanceDest": recipient_before,
+                    "newbalanceDest": recipient_after,
+                }
+            ]
+        )
+
         try:
-            result = score_df(raw)
-            p = float(result.loc[0, "estimated_fraud_probability"])
-            a, b, c = st.columns(3)
-            a.metric("Estimated fraud score", f"{p:.2%}")
-            b.metric("Decision threshold", f"{threshold:.0%}")
-            c.metric("Model decision", "Flag for review" if p >= threshold else "Not flagged")
-            st.progress(float(np.clip(p, 0, 1)))
-            if p >= threshold:
-                st.warning("This transaction meets the selected review threshold. Review the transaction before making a decision.")
+            result = score_transactions(
+                transaction,
+                threshold,
+            )
+
+            probability = float(
+                result.loc[0, "fraud_probability"]
+            )
+
+            col1, col2 = st.columns(2)
+
+            col1.metric(
+                "Estimated fraud probability",
+                f"{probability:.2%}",
+            )
+
+            col2.metric(
+                "Screening decision",
+                (
+                    "Flag for review"
+                    if probability >= threshold
+                    else "Not flagged"
+                ),
+            )
+
+            st.progress(
+                float(np.clip(probability, 0.0, 1.0))
+            )
+
+            if probability >= threshold:
+                st.warning(
+                    "The score meets the selected review threshold. "
+                    "This is not proof that the transaction is fraudulent."
+                )
             else:
-                st.success("This transaction is below the selected threshold. That does not prove it is legitimate.")
-            with st.expander("Input summary"):
-                st.dataframe(raw, use_container_width=True, hide_index=True)
-        except Exception as e:
-            st.error(f"Could not score transaction: {e}")
+                st.success(
+                    "The score is below the selected threshold. "
+                    "This does not guarantee that the transaction is safe."
+                )
 
-with batch_tab:
-    st.subheader("Screen a batch of transactions")
-    st.write("Upload a CSV with one transaction per row. Required columns:")
-    st.code(", ".join(RAW_REQUIRED), language="text")
-    st.caption("Only CASH_OUT and TRANSFER rows are supported by this model.")
-    template = pd.DataFrame([{
-        "type": "TRANSFER", "amount": 5000,
-        "oldbalanceOrg": 10000, "newbalanceOrig": 5000,
-        "oldbalanceDest": 2000, "newbalanceDest": 7000,
-    }, {
-        "type": "CASH_OUT", "amount": 12000,
-        "oldbalanceOrg": 15000, "newbalanceOrig": 3000,
-        "oldbalanceDest": 500, "newbalanceDest": 12500,
-    }])
-    st.download_button("Download sample CSV template", template.to_csv(index=False).encode("utf-8"),
-                       file_name="paymentshield_sample.csv", mime="text/csv")
-    uploaded = st.file_uploader("Upload transaction CSV", type=["csv"], key="batch_csv")
-    if uploaded:
-        try:
-            raw = pd.read_csv(uploaded)
-            missing = [c for c in RAW_REQUIRED if c not in raw.columns]
-            if missing:
-                st.error("Missing required columns: " + ", ".join(missing))
-            elif len(raw) == 0:
-                st.warning("The uploaded CSV contains no rows.")
-            else:
-                st.write(f"Loaded **{len(raw):,}** transactions.")
-                with st.expander("Preview uploaded data"):
-                    st.dataframe(raw.head(20), use_container_width=True, hide_index=True)
-                if st.button("Screen transactions", type="primary"):
-                    try:
-                        results = score_df(raw)
-                        n_flagged = int((results["estimated_fraud_probability"] >= threshold).sum())
-                        n_total = len(results)
-                        avg_p = float(results["estimated_fraud_probability"].mean())
-                        k1, k2, k3 = st.columns(3)
-                        k1.metric("Transactions screened", f"{n_total:,}")
-                        k2.metric("Flagged for review", f"{n_flagged:,}", f"{n_flagged/n_total:.1%} of batch")
-                        k3.metric("Mean estimated score", f"{avg_p:.2%}")
-                        hist = pd.DataFrame({
-                            "Score range": ["0–5%", "5–20%", "20–50%", "50–100%"],
-                            "Transactions": [
-                                int(((results["estimated_fraud_probability"] >= 0) & (results["estimated_fraud_probability"] < .05)).sum()),
-                                int(((results["estimated_fraud_probability"] >= .05) & (results["estimated_fraud_probability"] < .20)).sum()),
-                                int(((results["estimated_fraud_probability"] >= .20) & (results["estimated_fraud_probability"] < .50)).sum()),
-                                int((results["estimated_fraud_probability"] >= .50).sum()),
-                            ]
-                        })
-                        chart_col, text_col = st.columns([1, 1])
-                        with chart_col:
-                            st.markdown("#### Score distribution")
-                            st.bar_chart(hist.set_index("Score range"))
-                        with text_col:
-                            st.markdown("#### Review queue")
-                            flagged = results[results["estimated_fraud_probability"] >= threshold].sort_values(
-                                "estimated_fraud_probability", ascending=False
-                            )
-                            st.write(f"{len(flagged):,} transactions meet the selected threshold.")
-                            if len(flagged):
-                                st.dataframe(flagged.head(15), use_container_width=True, hide_index=True)
-                            else:
-                                st.info("No rows met the current threshold. You can adjust the threshold in the sidebar.")
-                        st.markdown("#### All scored transactions")
-                        st.dataframe(
-                            results.sort_values("estimated_fraud_probability", ascending=False),
-                            use_container_width=True, hide_index=True
-                        )
-                        st.download_button(
-                            "Download scored results",
-                            results.to_csv(index=False).encode("utf-8"),
-                            file_name="paymentshield_scored_transactions.csv",
-                            mime="text/csv",
-                        )
-                    except Exception as e:
-                        st.error(f"Batch screening failed: {e}")
-        except Exception as e:
-            st.error(f"Could not read CSV: {e}")
+        except Exception as exc:
+            st.error(f"Prediction failed: {exc}")
 
-with guide_tab:
-    st.subheader("What this app can and cannot tell you")
-    st.markdown("""
-**Workflow**
-1. Enter one transaction or upload a batch CSV.
-2. The app maps transaction fields to the seven features expected by the trained model.
-3. The model returns an estimated fraud probability.
-4. Scores at or above the selected threshold are placed in the review queue.
 
-**Limitations**
-- The model was trained on simulated PaySim transactions; that does not establish performance on real UPI or banking transactions.
-- A low score does not guarantee a transaction is safe, and a high score does not prove fraud.
-- The threshold is a configurable demo setting, not a validated operational policy.
-- Do not use this prototype to approve or reject real transactions without independent evaluation, security review, monitoring, and human oversight.
-- The app does not currently provide feature-attribution explanations such as SHAP; balance summaries are not proof of why the model made a prediction.
-""")
+# ==================================================
+# ABOUT
+# ==================================================
+
+with about_tab:
+    st.subheader("How PaymentShield AI works")
+
+    st.markdown(
+        """
+        1. The user enters a transaction or uploads a CSV.
+        2. The application validates the input fields.
+        3. Transaction type is converted into the two encoded features
+           expected by the model.
+        4. The saved XGBoost model returns an estimated fraud probability.
+        5. A configurable threshold determines which transactions
+           are flagged for further review.
+
+        ### Important limitations
+
+        - PaySim is simulated data. Results do not establish effectiveness
+          on real UPI or banking transactions.
+        - A low score does not guarantee a transaction is safe.
+        - A high score does not prove fraud.
+        - The threshold is a demo setting, not a validated operational policy.
+        - This app does not provide feature-attribution explanations.
+        - Do not use this prototype to approve or reject real payments
+          without rigorous validation, monitoring, and human oversight.
+        """
+    )
 
 st.divider()
-st.caption("PaymentShield AI · Portfolio prototype for ML-assisted transaction triage · Not for real financial decisions")
+
+st.caption(
+    "PaymentShield AI · Educational portfolio project · "
+    "No real payments are processed."
+)
