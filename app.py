@@ -220,8 +220,7 @@ st.markdown(
 )
 
 st.caption(
-    "An educational portfolio application using a saved XGBoost model "
-    trained on simulated PaySim transactions."
+    "PaymentShield AI is trained on simulated PaySim transactions."
 )
 
 # -------------------- SIDEBAR --------------------
